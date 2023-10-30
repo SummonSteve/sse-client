@@ -49,11 +49,12 @@ pub struct EventStream {
     on_open_listener: CallbackNoArgs,
     on_message_listener: Callback,
     on_error_listener: Callback,
-    last_event_id: LastIdWrapper
+    last_event_id: LastIdWrapper,
+    token: Option<String>
 }
 
 impl EventStream {
-    pub fn new(url: Url) -> Result<EventStream, Error> {
+    pub fn new(url: Url, token: Option<String>) -> Result<EventStream, Error> {
         let event_stream = EventStream {
             url: Arc::new(url),
             stream: Arc::new(Mutex::new(None)),
@@ -61,7 +62,8 @@ impl EventStream {
             on_open_listener: Arc::new(Mutex::new(None)),
             on_message_listener: Arc::new(Mutex::new(None)),
             on_error_listener: Arc::new(Mutex::new(None)),
-            last_event_id: Arc::new(Mutex::new(None))
+            last_event_id: Arc::new(Mutex::new(None)),
+            token
         };
 
         event_stream.listen();
@@ -73,6 +75,7 @@ impl EventStream {
         listen_stream(
             Arc::clone(&self.url),
             Arc::clone(&self.url),
+            self.token.clone(),
             Arc::clone(&self.stream),
             Arc::clone(&self.state),
             Arc::clone(&self.on_open_listener),
@@ -120,6 +123,7 @@ impl EventStream {
 fn listen_stream(
     url: Arc<Url>,
     connection_url: Arc<Url>,
+    token: Option<String>,
     stream: StreamWrapper,
     state: StateWrapper,
     on_open: CallbackNoArgs,
@@ -129,7 +133,7 @@ fn listen_stream(
     last_event_id: LastIdWrapper
 ) {
     thread::spawn(move || {
-        let action = match connect_event_stream(&connection_url, &stream, &last_event_id) {
+        let action = match connect_event_stream(&connection_url, &stream, &last_event_id, token.clone().unwrap_or(String::from(""))) {
             Ok(stream) => read_stream(stream, &state, &on_open, &on_message, &failed_attempts),
             Err(error) => Err(StreamAction::Reconnect(error.to_string()))
         };
@@ -140,7 +144,7 @@ fn listen_stream(
                     let mut state_lock = state.lock().unwrap();
                     *state_lock = State::Connecting;
                     handle_error(error.to_string(),  &on_error);
-                    reconnect_stream(url, stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id);
+                    reconnect_stream(url, stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id, token);
                 },
                 StreamAction::Close(ref error) => {
                     let mut state_lock = state.lock().unwrap();
@@ -151,21 +155,21 @@ fn listen_stream(
                     let mut state_lock = state.lock().unwrap();
                     *state_lock = State::Connecting;
 
-                    listen_stream(url, Arc::new(redirect_url), stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id);
+                    listen_stream(url, Arc::new(redirect_url), token, stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id);
                 },
                 StreamAction::MovePermanently(redirect_url) => {
                     let mut state_lock = state.lock().unwrap();
                     *state_lock = State::Connecting;
 
-                    listen_stream(Arc::new(redirect_url.clone()), Arc::new(redirect_url), stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id);
+                    listen_stream(Arc::new(redirect_url.clone()), Arc::new(redirect_url), token, stream, Arc::clone(&state), on_open, on_message, on_error, failed_attempts, last_event_id);
                 }
             };
         }
     });
 }
 
-fn connect_event_stream(url: &Url, stream: &StreamWrapper, last_event_id: &LastIdWrapper) -> Result<InnerStream, Error> {
-    let connection_stream = event_stream_handshake(url, last_event_id)?;
+fn connect_event_stream(url: &Url, stream: &StreamWrapper, last_event_id: &LastIdWrapper, token: String) -> Result<InnerStream, Error> {
+    let connection_stream = event_stream_handshake(url, last_event_id, token)?;
     let mut stream = stream.lock().unwrap();
 
     #[cfg(feature = "native-tls")]
@@ -177,7 +181,7 @@ fn connect_event_stream(url: &Url, stream: &StreamWrapper, last_event_id: &LastI
     Ok(connection_stream)
 }
 
-fn event_stream_handshake(url: &Url, last_event_id: &LastIdWrapper) -> Result<InnerStream, Error> {
+fn event_stream_handshake(url: &Url, last_event_id: &LastIdWrapper, token: String) -> Result<InnerStream, Error> {
     let host = get_host(&url);
     let host = host.as_str();
 
@@ -202,10 +206,11 @@ fn event_stream_handshake(url: &Url, last_event_id: &LastIdWrapper) -> Result<In
     };
 
     let request = format!(
-        "GET {} HTTP/1.1\r\nAccept: text/event-stream\r\nHost: {}\r\n{}\r\n",
+        "GET {} HTTP/1.1\r\nAccept: text/event-stream\r\nHost: {}\r\n{}\r\nAuthorization: {}\r\n",
         get_path_with_query_params(url),
         host,
-        extra_headers
+        extra_headers,
+        token
     );
 
     stream.write(request.as_bytes())?;
@@ -348,7 +353,8 @@ fn reconnect_stream(
     on_message: Callback,
     on_error: Callback,
     failed_attempts: Arc<Mutex<u32>>,
-    last_event_id: LastIdWrapper
+    last_event_id: LastIdWrapper,
+    token: Option<String>
 ) {
     let mut attempts = failed_attempts.lock().unwrap();
     let base: u64 = 2;
@@ -356,7 +362,7 @@ fn reconnect_stream(
     *attempts += 1;
 
     thread::sleep(Duration::from_millis(reconnection_time));
-    listen_stream(url.clone(), url, stream, Arc::clone(&state), on_open, on_message, on_error, Arc::clone(&failed_attempts), last_event_id);
+    listen_stream(url.clone(), url, token, stream, Arc::clone(&state), on_open, on_message, on_error, Arc::clone(&failed_attempts), last_event_id);
 }
 
 
@@ -381,7 +387,7 @@ mod tests {
     #[test]
     fn should_create_stream_object() {
         let (_server, _stream_endpoint, address) = setup();
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
         event_stream.close();
     }
 
@@ -392,7 +398,7 @@ mod tests {
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.send("Date: Thu, 24 May 2018 12:26:38 GMT\n");
 
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_open(move || {
             tx.send("open").unwrap();
@@ -406,7 +412,7 @@ mod tests {
     #[test]
     fn should_have_status_connecting_while_opening_connection() {
         let (_server, _stream_endpoint, address) = setup();
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         let state = event_stream.state();
         assert_eq!(state, State::Connecting);
@@ -417,7 +423,7 @@ mod tests {
     #[test]
     fn should_have_status_open_after_connection_stabilished() {
         let (_server, _stream_endpoint, address) = setup();
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         thread::sleep(Duration::from_millis(100));
         let state = event_stream.state();
@@ -429,7 +435,7 @@ mod tests {
     #[test]
     fn should_have_status_closed_after_closing_connection() {
         let (_server, _stream_endpoint, address) = setup();
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.close();
 
@@ -441,7 +447,7 @@ mod tests {
     fn should_trigger_listeners_when_message_received() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_message(move |message| {
             tx.send(message).unwrap();
@@ -464,7 +470,7 @@ mod tests {
     fn should_trigger_on_error_when_connection_closed_by_server() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_error(move |message| {
             tx.send(message).unwrap();
@@ -486,7 +492,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::InternalServerError);
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_error(move |message| {
             tx.send(message).unwrap();
@@ -503,7 +509,7 @@ mod tests {
     fn should_reconnect_when_connection_closed_by_server() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_message(move |message| {
             tx.send(message).unwrap();
@@ -525,7 +531,7 @@ mod tests {
     #[test]
     fn should_trigger_error_when_first_connection_fails() {
         let url = Url::parse("http://localhost:7777/sub").unwrap();
-        let mut event_stream = EventStream::new(url).unwrap();
+        let mut event_stream = EventStream::new(url, None).unwrap();
 
         let (tx, rx) = mpsc::channel();
 
@@ -544,7 +550,7 @@ mod tests {
         let (server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::ResetContent);
 
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         server.requests().recv().unwrap();
         server.requests().recv().unwrap();
@@ -559,7 +565,7 @@ mod tests {
         let (error_tx, error_rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.header("Content-Type", "application/json");
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_error(move |message| {
             error_tx.send(message).unwrap();
@@ -577,7 +583,7 @@ mod tests {
     fn should_reconnect_when_status_in_range_2xx_but_not_200() {
         let (server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::Accepted);
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         server.requests().recv().unwrap();
         server.requests().recv().unwrap();
@@ -592,7 +598,7 @@ mod tests {
         let (error_tx, error_rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::InternalServerError);
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_error(move |message| {
             error_tx.send(message).unwrap();
@@ -613,7 +619,7 @@ mod tests {
             .status(Status::Found)
             .header("Location", address2.as_str());
 
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         while stream_endpoint2.open_connections_count() != 1 {
             thread::sleep(Duration::from_millis(200));
@@ -631,8 +637,7 @@ mod tests {
             .status(Status::Found)
             .header("Location", address2.as_str());
 
-        let mut event_stream = EventStream::new(address).unwrap();
-
+        let mut event_stream = EventStream::new(address, None).unwrap();
         event_stream.on_message(move |message| {
             tx.send(message).unwrap();
         });
@@ -659,7 +664,7 @@ mod tests {
             .status(Status::MovedPermanently)
             .header("Location", address2.as_str());
 
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         let (tx, rx) = mpsc::channel();
 
@@ -694,7 +699,7 @@ mod tests {
             .status(Status::SeeOther)
             .header("Location", address2.as_str());
 
-        let mut event_stream = EventStream::new(address).unwrap();
+        let mut event_stream = EventStream::new(address, None).unwrap();
 
         event_stream.on_message(move |message| {
             tx.send(message).unwrap();
@@ -721,7 +726,7 @@ mod tests {
             .status(Status::TemporaryRedirect)
             .header("Location", address2.as_str());
 
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         while stream_endpoint2.open_connections_count() == 0 {
             thread::sleep(Duration::from_millis(100));
@@ -733,7 +738,7 @@ mod tests {
     #[test]
     fn should_stop_reconnection_when_status_204() {
         let (server, stream_endpoint, address) = setup();
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         // first connection
         stream_endpoint.status(Status::OK);
@@ -754,7 +759,7 @@ mod tests {
     fn should_try_to_reconnect_with_an_exponential_backoff() {
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::Accepted);
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         for _ in 0 .. 20 {
             thread::sleep(Duration::from_millis(100))
@@ -777,7 +782,7 @@ mod tests {
     fn should_reset_exponential_backoff_after_success_connection() {
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.status(Status::Accepted);
-        let event_stream = EventStream::new(address).unwrap();
+        let event_stream = EventStream::new(address, None).unwrap();
 
         for _ in 0 .. 20 {
             thread::sleep(Duration::from_millis(100))
@@ -834,7 +839,7 @@ mod tests {
             .header("Content-Type", "text/event-stream")
             .stream();
 
-        let event_stream = EventStream::new(stream_url).unwrap();
+        let event_stream = EventStream::new(stream_url, None).unwrap();
 
         thread::sleep(Duration::from_millis(100));
 

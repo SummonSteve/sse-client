@@ -76,8 +76,8 @@ impl EventSource {
     /// # use sse_client::EventSource;
     /// let event_source = EventSource::new("http://example.com/sub").unwrap();
     /// ```
-    pub fn new(url: &str) -> Result<EventSource, ParseError> {
-        let event_stream = Arc::new(Mutex::new(EventStream::new(Url::parse(url)?).unwrap()));
+    pub fn new(url: &str, token: Option<String>) -> Result<EventSource, ParseError> {
+        let event_stream = Arc::new(Mutex::new(EventStream::new(Url::parse(url)?, token).unwrap()));
         let stream_for_update = Arc::clone(&event_stream);
         let stream = Arc::clone(&event_stream);
         let mut event_stream = event_stream.lock().unwrap();
@@ -288,14 +288,14 @@ mod tests {
     #[test]
     fn should_create_client() {
         let (_server, _stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.close();
     }
 
     #[test]
     fn should_thrown_an_error_when_malformed_url_provided() {
-        match EventSource::new("127.0.0.1:1236/sub") {
+        match EventSource::new("127.0.0.1:1236/sub", None) {
             Ok(_) => assert!(false, "should had thrown an error"),
             Err(_) => assert!(true)
         }
@@ -305,7 +305,7 @@ mod tests {
     fn accept_closure_as_listeners() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_message(move |message| {
             tx.send(message.data).unwrap();
@@ -329,7 +329,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let tx2 = tx.clone();
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_message(move |message| {
             tx.send(message.data).unwrap();
@@ -359,7 +359,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_message(move |message| {
             tx.send(message.data).unwrap();
@@ -391,7 +391,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_message(move |message| {
             tx.send(message.data).unwrap();
@@ -421,7 +421,7 @@ mod tests {
     fn event_trigger_its_defined_listener() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.add_event_listener("myEvent", move |event| {
             tx.send(event).unwrap();
@@ -447,7 +447,7 @@ mod tests {
     fn dont_trigger_on_message_for_event() {
         let (tx, rx) = mpsc::channel();
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_message(move |_| {
             tx.send("NOOOOOOOOOOOOOOOOOOO!").unwrap();
@@ -468,7 +468,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
 
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
          event_source.on_message(move |message| {
             tx.send(message.data).unwrap();
@@ -493,7 +493,7 @@ mod tests {
         let (_server, stream_endpoint, address) = setup();
         stream_endpoint.delay(Duration::from_millis(200));
 
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
 
         event_source.on_open(move || {
             tx.send("open").unwrap();
@@ -511,7 +511,7 @@ mod tests {
             .delay(Duration::from_millis(200))
             .stream();
 
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
         thread::sleep(Duration::from_millis(100));
 
         assert_eq!(event_source.state(), State::Connecting);
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn should_send_last_event_id_on_reconnection() {
         let (server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
         thread::sleep(Duration::from_millis(100));
 
         stream_endpoint.send("id: helpMe\n");
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn should_expose_blocking_api() {
         let (_server, stream_endpoint, address) = setup();
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
         thread::sleep(Duration::from_millis(100));
         let rx = event_source.receiver();
 
@@ -569,7 +569,7 @@ mod tests {
         stream_endpoint
             .delay(Duration::from_millis(100))
             .status(Status::InternalServerError);
-        let event_source = EventSource::new(&address).unwrap();
+        let event_source = EventSource::new(&address, None).unwrap();
         let rx = event_source.receiver();
 
         assert_eq!(rx.recv().unwrap().type_, "error");
